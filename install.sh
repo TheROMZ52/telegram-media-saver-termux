@@ -2,8 +2,8 @@
 set -e
 cd "$(dirname "$0")"
 pkg update -y
-pkg install -y python python-pip
-python -m pip install -r requirements.txt
+pkg install -y python
+python -m py_compile bot.py
 mkdir -p saved_media
 chmod 700 .
 chmod 700 saved_media
