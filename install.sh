@@ -2,8 +2,7 @@
 set -e
 cd "$(dirname "$0")"
 pkg update -y
-pkg install -y python
-python -m pip install --upgrade pip
+pkg install -y python python-pip
 python -m pip install -r requirements.txt
 mkdir -p saved_media
 chmod 700 .
