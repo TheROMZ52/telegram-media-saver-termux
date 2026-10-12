@@ -1,20 +1,19 @@
-import asyncio
 import json
 import os
 import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
-
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 MEDIA_DIR = BASE_DIR / "saved_media"
 MEDIA_DIR.mkdir(exist_ok=True)
 CONFIG = {}
-dp = Dispatcher()
+API_BASE = ""
 
 
 def load_config():
@@ -44,14 +43,42 @@ def load_config():
     return data
 
 
-def is_owner(message: Message) -> bool:
-    return bool(message.from_user and message.from_user.id == CONFIG["owner_id"])
+def api(method, payload=None, timeout=40):
+    data = json.dumps(payload or {}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{API_BASE}/{method}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    if not result.get("ok"):
+        raise RuntimeError(result.get("description", "Telegram API error"))
+    return result["result"]
 
 
-def media_info(message: Message):
-    if message.photo:
-        return message.photo[-1], ".jpg", "photo"
-    for attr, label, default_ext in (
+def download_file(file_path, destination):
+    url = f"https://api.telegram.org/file/bot{CONFIG['bot_token']}/{file_path}"
+    request = urllib.request.Request(url)
+    with urllib.request.urlopen(request, timeout=120) as response, open(destination, "wb") as output:
+        while True:
+            chunk = response.read(1024 * 256)
+            if not chunk:
+                break
+            output.write(chunk)
+
+
+def send_message(chat_id, text, reply_to=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_to is not None:
+        payload["reply_to_message_id"] = reply_to
+    api("sendMessage", payload)
+
+
+def media_info(message):
+    if message.get("photo"):
+        return message["photo"][-1], ".jpg", "photo"
+    for key, label, default_ext in (
         ("video", "video", ".mp4"),
         ("animation", "animation", ".mp4"),
         ("document", "document", ".bin"),
@@ -59,91 +86,86 @@ def media_info(message: Message):
         ("voice", "voice", ".ogg"),
         ("video_note", "video-note", ".mp4"),
     ):
-        item = getattr(message, attr, None)
+        item = message.get(key)
         if item:
-            ext = Path(getattr(item, "file_name", "") or "").suffix
+            ext = Path(item.get("file_name", "")).suffix
             if not ext or not re.fullmatch(r"\.[A-Za-z0-9]{1,10}", ext):
                 ext = default_ext
             return item, ext, label
     return None
 
 
-@dp.message(Command("start"))
-async def start(message: Message):
-    if not is_owner(message):
-        await message.answer("Access denied.")
+def handle_message(message):
+    sender = message.get("from") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if sender.get("id") != CONFIG["owner_id"] or chat.get("type") != "private":
+        if chat_id is not None and chat.get("type") == "private":
+            send_message(chat_id, "Access denied.")
         return
-    await message.answer(
-        "Media Saver is ready.\n\n"
-        "Send a photo, video, animation, document, audio, voice message, or video note here. "
-        "The file will be saved on this device.\n\n"
-        "/status — storage status\n/help — help"
-    )
 
+    text = (message.get("text") or "").strip()
+    command = text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
 
-@dp.message(Command("help"))
-async def help_command(message: Message):
-    if not is_owner(message):
-        await message.answer("Access denied.")
+    if command == "/start":
+        send_message(chat_id, "Media Saver is ready.\n\nSend a photo, video, animation, document, audio, voice message, or video note here. The file will be saved on this device.\n\n/status — storage status\n/help — help", message.get("message_id"))
         return
-    await message.answer(
-        "Send media directly to this bot to save it in saved_media/.\n"
-        "Supported: photos, videos, animations, documents, audio, voice messages, and video notes.\n"
-        "/status — number and total size of saved files"
-    )
-
-
-@dp.message(Command("status"))
-async def status(message: Message):
-    if not is_owner(message):
-        await message.answer("Access denied.")
+    if command == "/help":
+        send_message(chat_id, "Send media directly to this bot to save it in saved_media/.\nSupported: photos, videos, animations, documents, audio, voice messages, and video notes.\n/status — number and total size of saved files", message.get("message_id"))
         return
-    files = [p for p in MEDIA_DIR.iterdir() if p.is_file()]
-    total = sum(p.stat().st_size for p in files)
-    await message.answer(f"Saved files: {len(files)}\nTotal size: {total / (1024 * 1024):.2f} MB")
-
-
-@dp.message(F.photo | F.video | F.animation | F.document | F.audio | F.voice | F.video_note)
-async def save_media(message: Message, bot: Bot):
-    if not is_owner(message):
-        await message.answer("Access denied.")
+    if command == "/status":
+        files = [p for p in MEDIA_DIR.iterdir() if p.is_file()]
+        total = sum(p.stat().st_size for p in files)
+        send_message(chat_id, f"Saved files: {len(files)}\nTotal size: {total / (1024 * 1024):.2f} MB", message.get("message_id"))
         return
 
     info = media_info(message)
     if not info:
-        await message.answer("Unsupported media.")
         return
 
     item, ext, label = info
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    file_id = re.sub(r"[^A-Za-z0-9_-]", "", item.file_id)[:24]
+    file_id = re.sub(r"[^A-Za-z0-9_-]", "", item.get("file_id", ""))[:24]
     destination = MEDIA_DIR / f"{stamp}_{label}_{file_id}{ext}"
 
     try:
-        telegram_file = await bot.get_file(item.file_id)
-        await bot.download_file(telegram_file.file_path, destination=destination)
+        file_data = api("getFile", {"file_id": item["file_id"]})
+        download_file(file_data["file_path"], destination)
         size_mb = destination.stat().st_size / (1024 * 1024)
-        await message.answer(f"Saved: {destination.name}\nSize: {size_mb:.2f} MB")
+        send_message(chat_id, f"Saved: {destination.name}\nSize: {size_mb:.2f} MB", message.get("message_id"))
     except Exception as exc:
         destination.unlink(missing_ok=True)
         print(f"Media download failed: {type(exc).__name__}: {exc}")
-        await message.answer(f"Download failed: {type(exc).__name__}")
+        send_message(chat_id, f"Download failed: {type(exc).__name__}", message.get("message_id"))
 
 
-async def main():
-    global CONFIG
+def main():
+    global CONFIG, API_BASE
     CONFIG = load_config()
-    bot = Bot(token=CONFIG["bot_token"])
-    try:
-        me = await bot.get_me()
-        print(f"Running as @{me.username or me.id}. Press Ctrl+C to stop.")
-        await dp.start_polling(bot)
-    finally:
-        await bot.session.close()
+    API_BASE = f"https://api.telegram.org/bot{CONFIG['bot_token']}"
+    me = api("getMe")
+    print(f"Running as @{me.get('username') or me['id']}. Press Ctrl+C to stop.")
+    offset = 0
+    while True:
+        try:
+            updates = api("getUpdates", {"offset": offset, "timeout": 30, "allowed_updates": ["message"]}, timeout=40)
+            for update in updates:
+                offset = update["update_id"] + 1
+                message = update.get("message")
+                if message:
+                    try:
+                        handle_message(message)
+                    except Exception as exc:
+                        print(f"Message handling failed: {type(exc).__name__}: {exc}")
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            print(f"Connection error: {type(exc).__name__}: {exc}")
+            time.sleep(3)
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         print("\nStopped.")
