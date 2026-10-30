@@ -2,6 +2,7 @@
 
 # Telegram Media Saver for Termux
 
+A tiny Termux helper that saves the media you send it. Finally, your Downloads folder has a plan.
 A personal Telegram bot that saves media sent directly to the bot into a local folder on an Android device running Termux.
 
 ## Requirements
