@@ -1,3 +1,5 @@
+[English](README.md) · [فارسی](README.fa.md)
+
 # Telegram Media Saver for Termux
 
 A personal Telegram bot that saves media sent directly to the bot into a local folder on an Android device running Termux.
